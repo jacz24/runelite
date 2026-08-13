@@ -146,10 +146,14 @@ public class SimbaCollisionFlagsDumper
 	private int dump(ZipOutputStream zip) throws IOException
 	{
 		int written = 0;
+		int regions = 0;
+		int examined = 0;
 		for (Region region : regionLoader.getRegions())
 		{
+			regions++;
 			for (int z = 0; z < Region.Z; z++)
 			{
+				examined++;
 				byte[] flags = new byte[Region.X * Region.Y * 2];
 				if (!computeRegionPlane(region, z, flags)) continue;
 				zip.putNextEntry(new ZipEntry(z + "/" + region.getRegionX() + "-" + region.getRegionY() + ".bin"));
@@ -158,6 +162,13 @@ public class SimbaCollisionFlagsDumper
 				written++;
 			}
 		}
+		// Coverage denominator, printed so the written count can be reconciled
+		// rather than assumed: a region-plane is skipped ONLY when no loc in it
+		// set a single flag bit. skipped = examined - written.
+		System.out.println("SimbaCollisionFlagsDumper coverage: regions=" + regions
+			+ " planes_examined=" + examined
+			+ " written=" + written
+			+ " skipped_flagless=" + (examined - written));
 		return written;
 	}
 
