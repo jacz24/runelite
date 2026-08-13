@@ -226,10 +226,18 @@ public class SimbaCollisionFlagsDumper
 		}
 
 		// type 0 or 2: primary cardinal edge (verbatim verified behaviour)
-		EntityOpsDefinition.Op op = new EntityOpsDefinition.Op("Close");
+		//
+		// COMPARE THE TEXT, NOT THE OBJECT. EntityOpsDefinition.Op declares neither
+		// equals() nor hashCode() (@AllArgsConstructor generates neither), so the
+		// upstream idiom `getOps().contains(new Op("Close"))` is reference identity
+		// and is false for every object in the game. That made this branch dead and
+		// silently routed all 225 open doors through WALL_EDGE, one cardinal step
+		// counter-clockwise of where they belong (sai-wex). The same idiom is still
+		// live upstream in SimbaCollisionMapDumper.java:441 -- sai-0p1.
 		boolean curtain = object.getName() != null && object.getName().contains("urtain");
 		boolean functional = object.getWallOrDoor() != 0 && !curtain
-			&& object.getOps() != null && object.getOps().getOps().contains(op);
+			&& object.getOps() != null && object.getOps().getOps().stream()
+				.anyMatch(o -> o != null && "Close".equals(o.text));
 		int card = functional ? DOOR_EDGE[rotation] : WALL_EDGE[rotation];
 		setCardinal(flags, binTx, binTy, card, isDoor);
 
