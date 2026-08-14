@@ -18,7 +18,12 @@
  *   byte 0  wall block (8 dir, mirrors CollisionDataFlag low byte):
  *     NW 0x01  N 0x02  NE 0x04  E 0x08  SE 0x10  S 0x20  SW 0x40  W 0x80
  *   byte 1  door + meta:
- *     doorN 0x01  doorE 0x02  doorS 0x04  doorW 0x08   FULL(non-standable) 0x10
+ *     doorN 0x01 doorE 0x02 doorS 0x04 doorW 0x08  FULL(non-standable) 0x10
+ *     TERRAIN_BLOCKED 0x20  NO_FLOOR 0x40
+ *
+ * v2 (sai-4bs): every cached region-plane is written unconditionally (absence
+ * now means "not in the cache", not "flagless"), marked by a meta/layout.txt
+ * zip entry so decoders can tell a terrain-carrying dump from a legacy one.
  *
  * Loc -> flags (set only on the loc's own tile; region-mapper ORs both tiles'
  * facing bits, so no neighbour mirror is needed):
@@ -64,6 +69,14 @@ public class SimbaCollisionFlagsDumper
 	private static final int[] CARD_DOOR = {0x01, 0x02, 0x04, 0x08};
 	// byte 1 meta
 	private static final int FULL = 0x10;
+
+	// byte 1 terrain (sai-4bs step 2; Max's two-spare-bits ruling 2026-08-14):
+	// TERRAIN_BLOCKED = the ground itself is unwalkable (tileSetting bit 1:
+	// water, cliffs), NO_FLOOR = nothing is rendered here at all (no underlay,
+	// no overlay -- the void around upper-plane interiors). Different facts,
+	// deliberately not collapsed; 0x80 stays spare.
+	private static final int TERRAIN_BLOCKED = 0x20;
+	private static final int NO_FLOOR = 0x40;
 
 	// rotation -> edge/corner index (see header; verified vs drawObjects)
 	private static final int[] WALL_EDGE = {CW, CN, CE, CS};    // type 0/2 primary, non-functional
@@ -145,30 +158,41 @@ public class SimbaCollisionFlagsDumper
 
 	private int dump(ZipOutputStream zip) throws IOException
 	{
+		// Decoders key "is this a terrain-carrying dump" off this entry;
+		// its presence also changes what ABSENCE means (see below).
+		zip.putNextEntry(new ZipEntry("meta/layout.txt"));
+		zip.write((
+			"collision_flags v2 (sai-4bs)\n"
+			+ "2 bytes/tile, entry {plane}/{rx}-{ry}.bin, ty = 63 - localY\n"
+			+ "byte0: 8-dir wall block  NW 01 N 02 NE 04 E 08 SE 10 S 20 SW 40 W 80\n"
+			+ "byte1: doorN 01 doorE 02 doorS 04 doorW 08  FULL 10\n"
+			+ "       TERRAIN_BLOCKED 20 (tileSetting bit 1: water/cliffs)\n"
+			+ "       NO_FLOOR 40 (no underlay AND no overlay: void)\n"
+			+ "every cached region-plane is written; an ABSENT entry means the\n"
+			+ "region does not exist in the cache: ocean/void, NOT standable\n"
+		).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+		zip.closeEntry();
+
 		int written = 0;
 		int regions = 0;
-		int examined = 0;
 		for (Region region : regionLoader.getRegions())
 		{
 			regions++;
 			for (int z = 0; z < Region.Z; z++)
 			{
-				examined++;
 				byte[] flags = new byte[Region.X * Region.Y * 2];
-				if (!computeRegionPlane(region, z, flags)) continue;
+				computeRegionPlane(region, z, flags);
+				// Written even when all-zero: with terrain in-band, PRESENCE
+				// means "this region-plane exists in the cache" and absence
+				// means void. All-zero entries deflate to almost nothing.
 				zip.putNextEntry(new ZipEntry(z + "/" + region.getRegionX() + "-" + region.getRegionY() + ".bin"));
 				zip.write(flags);
 				zip.closeEntry();
 				written++;
 			}
 		}
-		// Coverage denominator, printed so the written count can be reconciled
-		// rather than assumed: a region-plane is skipped ONLY when no loc in it
-		// set a single flag bit. skipped = examined - written.
 		System.out.println("SimbaCollisionFlagsDumper coverage: regions=" + regions
-			+ " planes_examined=" + examined
-			+ " written=" + written
-			+ " skipped_flagless=" + (examined - written));
+			+ " region_planes_written=" + written + " (v2: all cached planes)");
 		return written;
 	}
 
@@ -189,6 +213,32 @@ public class SimbaCollisionFlagsDumper
 			if ((region.getTileSetting(z, localX, localY) & 24) != 0) continue;
 
 			if (applyLocation(loc, localX, localY, flags)) any = true;
+		}
+
+		// Terrain channel. Bridge remap mirrors SimbaCollisionMapDumper
+		// .drawRegions: on plane 0 a bridge tile (plane-1 setting bit 2)
+		// shows the DECK's facts, and the remap is skipped for tiles the
+		// client hides (setting & 24) -- ported verbatim, not improved.
+		for (int localX = 0; localX < Region.X; localX++)
+		{
+			for (int localY = 0; localY < Region.Y; localY++)
+			{
+				int settingPlane = z;
+				int setting = region.getTileSetting(z, localX, localY);
+				if ((setting & 24) == 0 && z == 0
+					&& (region.getTileSetting(1, localX, localY) & 2) != 0)
+				{
+					settingPlane = 1;
+				}
+				boolean blocked = (region.getTileSetting(settingPlane, localX, localY) & 1) != 0;
+				boolean noFloor = region.getUnderlayId(settingPlane, localX, localY) == 0
+					&& region.getOverlayId(settingPlane, localX, localY) == 0;
+				if (!blocked && !noFloor) continue;
+				int base = ((Region.Y - 1 - localY) * Region.X + localX) * 2;
+				if (blocked) flags[base + 1] |= (byte) TERRAIN_BLOCKED;
+				if (noFloor) flags[base + 1] |= (byte) NO_FLOOR;
+				any = true;
+			}
 		}
 		return any;
 	}
