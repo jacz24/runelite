@@ -19,7 +19,8 @@
  *     NW 0x01  N 0x02  NE 0x04  E 0x08  SE 0x10  S 0x20  SW 0x40  W 0x80
  *   byte 1  door + meta:
  *     doorN 0x01 doorE 0x02 doorS 0x04 doorW 0x08  FULL(non-standable) 0x10
- *     TERRAIN_BLOCKED 0x20  NO_FLOOR 0x40
+ *     TERRAIN_BLOCKED 0x20  NO_FLOOR 0x40 (planes 1-3 only; plane 0 never
+ *     carries it -- underground dark cave floor is walkable, sai-4bs op ruling)
  *
  * v2 (sai-4bs): every cached region-plane is written unconditionally (absence
  * now means "not in the cache", not "flagless"), marked by a meta/layout.txt
@@ -167,7 +168,7 @@ public class SimbaCollisionFlagsDumper
 			+ "byte0: 8-dir wall block  NW 01 N 02 NE 04 E 08 SE 10 S 20 SW 40 W 80\n"
 			+ "byte1: doorN 01 doorE 02 doorS 04 doorW 08  FULL 10\n"
 			+ "       TERRAIN_BLOCKED 20 (tileSetting bit 1: water/cliffs)\n"
-			+ "       NO_FLOOR 40 (no underlay AND no overlay: void)\n"
+			+ "       NO_FLOOR 40 (planes 1-3 only: no underlay AND no overlay = void; plane 0 never carries it - underground dark floor is walkable)\n"
 			+ "every cached region-plane is written; an ABSENT entry means the\n"
 			+ "region does not exist in the cache: ocean/void, NOT standable\n"
 		).getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -231,7 +232,14 @@ public class SimbaCollisionFlagsDumper
 					settingPlane = 1;
 				}
 				boolean blocked = (region.getTileSetting(settingPlane, localX, localY) & 1) != 0;
-				boolean noFloor = region.getUnderlayId(settingPlane, localX, localY) == 0
+				// z (the plane being written), not settingPlane: NO_FLOOR is a
+				// planes-1-3 fact only (sai-4bs operator ruling, live-cache
+				// measurement 2026-08-14). Plane-0 "no underlay/overlay" tiles are
+				// walkable underground dark cave floor (dungeon regions (18,152),
+				// (49,69) etc.), not void -- sky-void doesn't exist on plane 0 and
+				// open ocean is already covered by absent regions + TERRAIN_BLOCKED.
+				boolean noFloor = z > 0
+					&& region.getUnderlayId(settingPlane, localX, localY) == 0
 					&& region.getOverlayId(settingPlane, localX, localY) == 0;
 				if (!blocked && !noFloor) continue;
 				int base = ((Region.Y - 1 - localY) * Region.X + localX) * 2;
