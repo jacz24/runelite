@@ -10,7 +10,7 @@
  * 8-directional flood.
  *
  * Output: collision_flags.zip, one entry "{plane}/{regionX}-{regionY}.bin" per
- * region+plane that has any flag. Each entry is Region.X*Region.Y*2 = 8192 bytes,
+ * region-plane of every cached region (v2 writes all planes unconditionally). Each entry is Region.X*Region.Y*2 = 8192 bytes,
  * TWO bytes per tile, index = (ty*64 + tx)*2 with tx = localX and ty = 63 - localY
  * (matching the collision PNG chunk orientation so region-mapper indexing is
  * unchanged).
