@@ -21,6 +21,7 @@
  *     doorN 0x01 doorE 0x02 doorS 0x04 doorW 0x08  FULL(non-standable) 0x10
  *     TERRAIN_BLOCKED 0x20  NO_FLOOR 0x40 (planes 1-3 only; plane 0 never
  *     carries it -- underground dark cave floor is walkable, sai-4bs op ruling)
+ *     DIAG_DOOR 0x80 -- this FULL tile is a diagonal DOOR, not a diagonal wall
  *
  * v2 (sai-4bs): every cached region-plane is written unconditionally (absence
  * now means "not in the cache", not "flagless"), marked by a meta/layout.txt
@@ -32,6 +33,24 @@
  *   type 2:    the type-0 edge PLUS a second edge CORNER2_EDGE{N,E,S,W}
  *   type 1,3:  one corner bit CORNER_EDGE{NW,NE,SE,SW}  (type 1 is the gap the PNG drops)
  *   type 9:    FULL (byte1 0x10) -> tile non-standable; 8-conn rule seals diagonal fences
+ *              PLUS DIAG_DOOR (byte1 0x80) when the object carries an Open/Close op
+ *
+ * DIAGONAL DOORS (sai-0ju, operator ruling 2026-08-18). Before this, type 9 wrote
+ * FULL unconditionally and short-circuited before any door classification, so a
+ * diagonal doorway landed here as a permanently sealed tile carrying NO door
+ * information -- never in the door population, never graded, unopenable. Probed
+ * instance: Door id 1541 at (2950,3207) p0 Rimmington, walked through in game.
+ *
+ * The predicate is the same one the cardinal branch uses -- COMPARE THE OP TEXT --
+ * widened to both door states, because a diagonal door placed closed ("Open") is
+ * as much a crossing as one placed open ("Close"). Measured against the live cache
+ * 2026-08-18: 110,963 type-9 locs world-wide, of which 371 are named and exactly
+ * 28 carry Open/Close (27 Door + 1 Guild door; p0:26 p1:2). wallOrDoor is NOT a
+ * doorness test -- ObjectLoader.post() sets it to 1 for anything carrying any op,
+ * so it is true for all 371 including Cloud bank, Rat wall and Wall of flame.
+ * Deliberately excluded: Cell door 58251, Prison door 43457 and Curtain 31885 have
+ * no ops at all -- no conditional ops and no varbit-swap children either -- so
+ * there is nothing for a player to click and they stay correctly sealed.
  *
  * Edge mapping for types 0/2 is verified against SimbaCollisionMapDumper pixel
  * draws (overlay-confirmed). Corner/diagonal semantics are per CollisionDataFlag
@@ -75,9 +94,12 @@ public class SimbaCollisionFlagsDumper
 	// TERRAIN_BLOCKED = the ground itself is unwalkable (tileSetting bit 1:
 	// water, cliffs), NO_FLOOR = nothing is rendered here at all (no underlay,
 	// no overlay -- the void around upper-plane interiors). Different facts,
-	// deliberately not collapsed; 0x80 stays spare.
+	// deliberately not collapsed.
 	private static final int TERRAIN_BLOCKED = 0x20;
 	private static final int NO_FLOOR = 0x40;
+	// byte 1, the last spare bit (sai-0ju, Max's ruling 2026-08-18): this FULL
+	// tile is a diagonal DOOR. Only ever set alongside FULL.
+	private static final int DIAG_DOOR = 0x80;
 
 	// rotation -> edge/corner index (see header; verified vs drawObjects)
 	private static final int[] WALL_EDGE = {CW, CN, CE, CS};    // type 0/2 primary, non-functional
@@ -169,6 +191,7 @@ public class SimbaCollisionFlagsDumper
 			+ "byte1: doorN 01 doorE 02 doorS 04 doorW 08  FULL 10\n"
 			+ "       TERRAIN_BLOCKED 20 (tileSetting bit 1: water/cliffs)\n"
 			+ "       NO_FLOOR 40 (planes 1-3 only: no underlay AND no overlay = void; plane 0 never carries it - underground dark floor is walkable)\n"
+			+ "       DIAG_DOOR 80 (only ever set with FULL: this diagonal is an openable DOOR, not a wall)\n"
 			+ "every cached region-plane is written; an ABSENT entry means the\n"
 			+ "region does not exist in the cache: ocean/void, NOT standable\n"
 		).getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -273,7 +296,12 @@ public class SimbaCollisionFlagsDumper
 
 		if (type == 9)                                      // diagonal wall -> seal the whole tile
 		{
-			flags[(binTy * Region.X + binTx) * 2 + 1] |= (byte) FULL;
+			// ...but a diagonal DOORWAY is a real crossing, so mark it as one
+			// rather than sealing it silently (sai-0ju). Same op-TEXT test the
+			// cardinal branch uses, widened to both door states.
+			int bits = FULL;
+			if (hasOp(object, "Open") || hasOp(object, "Close")) bits |= DIAG_DOOR;
+			flags[(binTy * Region.X + binTx) * 2 + 1] |= (byte) bits;
 			return true;
 		}
 
@@ -293,9 +321,7 @@ public class SimbaCollisionFlagsDumper
 		// counter-clockwise of where they belong (sai-wex). The same idiom is still
 		// live upstream in SimbaCollisionMapDumper.java:441 -- sai-0p1.
 		boolean curtain = object.getName() != null && object.getName().contains("urtain");
-		boolean functional = object.getWallOrDoor() != 0 && !curtain
-			&& object.getOps() != null && object.getOps().getOps().stream()
-				.anyMatch(o -> o != null && "Close".equals(o.text));
+		boolean functional = object.getWallOrDoor() != 0 && !curtain && hasOp(object, "Close");
 		int card = functional ? DOOR_EDGE[rotation] : WALL_EDGE[rotation];
 		setCardinal(flags, binTx, binTy, card, isDoor);
 
@@ -303,6 +329,15 @@ public class SimbaCollisionFlagsDumper
 			setCardinal(flags, binTx, binTy, CORNER2_EDGE[rotation], isDoor);
 
 		return true;
+	}
+
+	// The op TEXT, never the Op object: EntityOpsDefinition.Op declares neither
+	// equals() nor hashCode(), so `getOps().contains(new Op("Close"))` is
+	// reference identity and false for every object in the game (sai-wex).
+	private static boolean hasOp(ObjectDefinition object, String text)
+	{
+		return object.getOps() != null && object.getOps().getOps().stream()
+			.anyMatch(o -> o != null && text.equals(o.text));
 	}
 
 	private void setCardinal(byte[] flags, int tx, int ty, int card, boolean isDoor)
