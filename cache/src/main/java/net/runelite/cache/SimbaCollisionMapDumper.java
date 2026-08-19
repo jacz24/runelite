@@ -422,15 +422,27 @@ public class SimbaCollisionMapDumper
 							if (object.getInteractType() != 1) continue;
 						}
 
+						// Wintertodt invisible non-collision walls. HOISTED above the
+						// type dispatch so it covers loc type 9 as well: nested inside
+						// the 0..3 branch it missed the separate type-9 branch below,
+						// which painted the diagonal across the tile body. The flags
+						// dumper never had the bug -- its wallish filter is
+						// (type 0..3) || type == 9 with the id test after it -- so the
+						// two dumpers disagreed about the same id. Measured over region
+						// 19-55: 60 id-24720 locs, 48 of types 0-3 carved out by both,
+						// 12 of type 9 wrongly painted, of which 4 are main diagonals
+						// landing on the centre pixel terrain.py samples and 8 are anti
+						// diagonals no centre-sampled census could surface.
+						if (object.getId() == 24720) {
+							continue;
+						}
+
 						int rotation = location.getOrientation();
 						int drawX = (drawBaseX + localX) * MAP_SCALE;
 						int drawY = (drawBaseY + (Region.Y - object.getSizeY() - localY)) * MAP_SCALE;
 
 						if (type >= 0 && type <= 3)
 						{
-							if (object.getId() == 24720) { //wintertodt invisible non collision walls
-								continue;
-							}
 							int rgb = wallColor;
 							if (object.getWallOrDoor() != 0) rgb = doorColor;
 
