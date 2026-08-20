@@ -55,11 +55,37 @@
  * Edge mapping for types 0/2 is verified against SimbaCollisionMapDumper pixel
  * draws (overlay-confirmed). Corner/diagonal semantics are per CollisionDataFlag
  * + WorldArea.canTravelInDirection (runelite-api).
+ *
+ * OPEN WATER (sai-l34, operator rulings 2026-08-17 + 2026-08-19). Jagex never
+ * marks open water unwalkable -- the client never lets you swim, so tileSetting
+ * bit 1 sits on cliffs and walls but not on the sea. A flood-fill therefore
+ * walked 4.2M ocean tiles into one "standable" component, plus a 0.5M-tile
+ * map-border ring and hundreds of false-BOUNDED river/lake pockets. The signal
+ * that identifies water is the overlay DEFINITION (probed world-wide, mechanics
+ * rows 85/89 -- a region-level "no settings" test was measured and refuted):
+ * every open-water overlay renders as rgb 0xFF00FF (the do-not-draw marker) +
+ * no texture + a blue-dominant secondaryRgbColor. Tiles whose overlay matches
+ * get TERRAIN_BLOCKED, on every plane, with two adjudicated adjustments
+ * (id-set freeze on the bead, 2026-08-19):
+ *   EXEMPT id 56 -- the rule's one measured false positive: it floors twin
+ *   instanced interiors at (1746,4933)/(1618,4932); zero sea tiles, 91% of
+ *   its world footprint inside walkable components. Floor paint, not water.
+ *   EXPLICIT ids -- water/void definitions the blue rule cannot see: 580/583
+ *   (teal-gray northern sea, b == g), 625 (map-edge void filler: the entire
+ *   border ring, zero walkable tiles world-wide), and the adjudicated sea
+ *   id-tail 232/303/329/330/424/425/642 (dark/silt water variants, each
+ *   >=87% phantom+blocked world-wide).
+ * BRIDGE EXEMPTION IS LOAD-BEARING: a tile whose plane-above setting carries
+ * bit 2 keeps its deck standable (the dumper's existing remap key). Without it
+ * the Port Sarim dock dies and Karamja splits at its river bridge (measured:
+ * 47,804 -> 27,072). Rule-based on purpose -- overlay ids drift across cache
+ * builds; only the adjudicated exceptions are pinned by id.
  */
 package net.runelite.cache;
 
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.cache.definitions.*;
+import net.runelite.cache.definitions.loaders.OverlayLoader;
 import net.runelite.cache.fs.*;
 import net.runelite.cache.region.Location;
 import net.runelite.cache.region.Position;
@@ -72,6 +98,8 @@ import org.apache.commons.cli.*;
 import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -101,17 +129,28 @@ public class SimbaCollisionFlagsDumper
 	// tile is a diagonal DOOR. Only ever set alongside FULL.
 	private static final int DIAG_DOOR = 0x80;
 
+	// sai-l34 water id-set freeze (see header). Water encodes as
+	// TERRAIN_BLOCKED -- byte 1 is fully allocated, a distinct WATER class
+	// would cost a format change (Max's policy ruling 2026-08-19); a future
+	// sailing consumer re-derives water from the overlay definitions instead.
+	private static final Set<Integer> WATER_EXEMPT = Set.of(56);
+	private static final Set<Integer> WATER_EXPLICIT =
+		Set.of(580, 583, 625, 232, 303, 329, 330, 424, 425, 642);
+
 	// rotation -> edge/corner index (see header; verified vs drawObjects)
 	private static final int[] WALL_EDGE = {CW, CN, CE, CS};    // type 0/2 primary, non-functional
 	private static final int[] DOOR_EDGE = {CN, CE, CS, CW};    // type 0/2 functional door
 	private static final int[] CORNER2_EDGE = {CN, CE, CS, CW}; // type 2 second edge
 	private static final int[] CORNER_EDGE = {0, 1, 2, 3};      // type 1/3: rot -> {NW,NE,SE,SW}
 
+	private final Store store;
 	private final RegionLoader regionLoader;
 	private final ObjectManager objectManager;
+	private final Set<Integer> waterOverlayIds = new HashSet<>();
 
 	public SimbaCollisionFlagsDumper(Store store, KeyProvider keyProvider)
 	{
+		this.store = store;
 		this.regionLoader = new RegionLoader(store, keyProvider);
 		this.objectManager = new ObjectManager(store);
 	}
@@ -176,7 +215,31 @@ public class SimbaCollisionFlagsDumper
 		objectManager.load();
 		regionLoader.loadRegions();
 		regionLoader.calculateBounds();
+		loadWaterOverlayIds();
 		return this;
+	}
+
+	// The water id set, from the overlay DEFINITION table (loadOverlays
+	// pattern in MapImageDumper). Rule + adjudicated exceptions; see header.
+	private void loadWaterOverlayIds() throws IOException
+	{
+		Storage storage = store.getStorage();
+		Index index = store.getIndex(IndexType.CONFIGS);
+		Archive archive = index.getArchive(ConfigType.OVERLAY.getId());
+		ArchiveFiles files = archive.getFiles(storage.loadArchive(archive));
+		for (FSFile file : files.getFiles())
+		{
+			OverlayDefinition d = new OverlayLoader().load(file.getFileId(), file.getContents());
+			int sec = d.getSecondaryRgbColor();
+			int r = (sec >> 16) & 0xFF, g = (sec >> 8) & 0xFF, b = sec & 0xFF;
+			boolean water = d.getRgbColor() == 0xFF00FF && d.getTexture() == -1
+				&& sec != -1 && b > r && b > g;
+			if ((water && !WATER_EXEMPT.contains(d.getId())) || WATER_EXPLICIT.contains(d.getId()))
+			{
+				waterOverlayIds.add(d.getId());
+			}
+		}
+		log.info("water/void overlay id set: {} ids", waterOverlayIds.size());
 	}
 
 	private int dump(ZipOutputStream zip) throws IOException
@@ -189,7 +252,8 @@ public class SimbaCollisionFlagsDumper
 			+ "2 bytes/tile, entry {plane}/{rx}-{ry}.bin, ty = 63 - localY\n"
 			+ "byte0: 8-dir wall block  NW 01 N 02 NE 04 E 08 SE 10 S 20 SW 40 W 80\n"
 			+ "byte1: doorN 01 doorE 02 doorS 04 doorW 08  FULL 10\n"
-			+ "       TERRAIN_BLOCKED 20 (tileSetting bit 1: water/cliffs)\n"
+			+ "       TERRAIN_BLOCKED 20 (tileSetting bit 1: cliffs/walls; OR open-water/void\n"
+			+ "         overlay per the sai-l34 definition rule, bridge-decked tiles exempt)\n"
 			+ "       NO_FLOOR 40 (planes 1-3 only: no underlay AND no overlay = void; plane 0 never carries it - underground dark floor is walkable)\n"
 			+ "       DIAG_DOOR 80 (only ever set with FULL: this diagonal is an openable DOOR, not a wall)\n"
 			+ "every cached region-plane is written; an ABSENT entry means the\n"
@@ -264,9 +328,17 @@ public class SimbaCollisionFlagsDumper
 				boolean noFloor = z > 0
 					&& region.getUnderlayId(settingPlane, localX, localY) == 0
 					&& region.getOverlayId(settingPlane, localX, localY) == 0;
-				if (!blocked && !noFloor) continue;
+				// Open water -> TERRAIN_BLOCKED (sai-l34, see header). The
+				// tile's OWN plane, not settingPlane: the bridge exemption is
+				// the plane-above bit itself, so a decked tile keeps the
+				// deck's standability instead of the water's block.
+				boolean bridgeAbove = z + 1 < Region.Z
+					&& (region.getTileSetting(z + 1, localX, localY) & 2) != 0;
+				boolean water = !bridgeAbove
+					&& waterOverlayIds.contains(region.getOverlayId(z, localX, localY));
+				if (!blocked && !noFloor && !water) continue;
 				int base = ((Region.Y - 1 - localY) * Region.X + localX) * 2;
-				if (blocked) flags[base + 1] |= (byte) TERRAIN_BLOCKED;
+				if (blocked || water) flags[base + 1] |= (byte) TERRAIN_BLOCKED;
 				if (noFloor) flags[base + 1] |= (byte) NO_FLOOR;
 				any = true;
 			}
